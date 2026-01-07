@@ -125,7 +125,10 @@
             const container = document.getElementById('featured-reel-container');
             // If it's a YouTube/Vimeo link, embed it. If direct video, use video tag.
             let mediaHtml = '';
-            if (data.videoUrl && (data.videoUrl.includes('youtube') || data.videoUrl.includes('youtu.be'))) {
+            // Check for direct base64 video (starts with data:video)
+            if (data.videoUrl && data.videoUrl.startsWith('data:video')) {
+                mediaHtml = `<video class="w-full h-full object-cover" src="${data.videoUrl}" controls autoplay loop muted playsinline></video>`;
+            } else if (data.videoUrl && (data.videoUrl.includes('youtube') || data.videoUrl.includes('youtu.be'))) {
                 const videoId = data.videoUrl.split('v=')[1] || data.videoUrl.split('/').pop();
                 mediaHtml = `<iframe class="w-full h-full object-cover" src="https://www.youtube.com/embed/${videoId}?autoplay=0&mute=0&controls=1&rel=0" frameborder="0" allowfullscreen></iframe>`;
             } else if (data.videoUrl && data.videoUrl.includes('vimeo')) {
@@ -161,7 +164,13 @@
             if(document.getElementById('admin-reel-title')) {
                 document.getElementById('admin-reel-title').value = data.title || '';
                 document.getElementById('admin-reel-subtitle').value = data.subtitle || '';
-                document.getElementById('admin-reel-video').value = data.videoUrl || '';
+                // Don't populate huge base64 strings into the text input, keep it clean
+                if (!data.videoUrl.startsWith('data:video')) {
+                    document.getElementById('admin-reel-video').value = data.videoUrl || '';
+                } else {
+                     document.getElementById('admin-reel-video').placeholder = "Current: Uploaded Video (Device)";
+                     document.getElementById('admin-reel-video').value = "";
+                }
             }
         }
 
@@ -186,6 +195,12 @@
                     card.className = `group relative aspect-[9/16] md:aspect-[4/5] overflow-hidden rounded-md bg-gray-900 border border-gray-800 hover:border-cyan/50 transition-all duration-500 opacity-0 translate-y-10 scroll-element`;
                     card.style.animationDelay = `${index * 100}ms`;
                     
+                    let linkAction = `href="${project.videoUrl}" target="_blank"`;
+                    let playButton = `WATCH PROJECT <i class="fas fa-arrow-right ml-2 transform group-hover/btn:translate-x-1 transition-transform"></i>`;
+                    
+                    // If uploaded video, open in new tab or create a modal (for simplicity here, new tab/simple view)
+                    // Or if it's a direct video file, we can show a small preview on hover or handle differently
+                    
                     card.innerHTML = `
                         <img src="${project.thumbnail || 'https://via.placeholder.com/800x1000/111/333?text=Project'}" alt="${project.title}" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110 opacity-80 group-hover:opacity-100">
                         <div class="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent opacity-90"></div>
@@ -193,12 +208,10 @@
                         <div class="absolute bottom-0 left-0 w-full p-6 translate-y-2 group-hover:translate-y-0 transition-transform duration-300">
                             <span class="text-xs font-bold text-cyan tracking-widest uppercase mb-2 block">${project.category || 'Edit'}</span>
                             <h3 class="text-2xl font-cinzel text-white leading-tight mb-4">${project.title}</h3>
-                            <a href="${project.videoUrl}" target="_blank" class="inline-flex items-center text-sm text-gray-300 hover:text-white transition-colors group/btn">
-                                WATCH PROJECT <i class="fas fa-arrow-right ml-2 transform group-hover/btn:translate-x-1 transition-transform"></i>
+                            <a ${linkAction} class="inline-flex items-center text-sm text-gray-300 hover:text-white transition-colors group/btn">
+                                ${playButton}
                             </a>
                         </div>
-                        
-                        <!-- Admin Edit Trigger (Visual only, logic in admin panel) -->
                     `;
                     grid.appendChild(card);
                 });
@@ -211,14 +224,40 @@
             }, (err) => console.error("Projects fetch error:", err));
         }
 
+        // --- Helper: Read File as Base64 ---
+        const readFileAsBase64 = (file) => {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = error => reject(error);
+                reader.readAsDataURL(file);
+            });
+        };
+
         // --- Admin Functions ---
         window.saveReel = async () => {
             const title = document.getElementById('admin-reel-title').value;
             const subtitle = document.getElementById('admin-reel-subtitle').value;
-            const videoUrl = document.getElementById('admin-reel-video').value;
+            let videoUrl = document.getElementById('admin-reel-video').value;
             const thumbnail = document.getElementById('admin-reel-thumb-preview').src;
+            
+            // Check for file upload
+            const fileInput = document.getElementById('admin-reel-file-upload');
+            if (fileInput.files.length > 0) {
+                const file = fileInput.files[0];
+                if (file.size > 900000) { // ~900KB safety limit for Firestore
+                    alert("⚠️ Video file too large! Please upload a video smaller than 1MB or use a YouTube URL.");
+                    return;
+                }
+                try {
+                     videoUrl = await readFileAsBase64(file);
+                } catch(e) {
+                    alert("Error reading file");
+                    return;
+                }
+            }
 
-            if (!title || !videoUrl) return alert("Title and Video URL are required");
+            if (!title || !videoUrl) return alert("Title and Video (URL or File) are required");
 
             const btn = document.getElementById('save-reel-btn');
             btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
@@ -231,6 +270,8 @@
                     await addDoc(window.collectionPathPublic('showreel'), data);
                 }
                 alert("Showreel updated!");
+                // Clear file input
+                fileInput.value = "";
             } catch (e) {
                 console.error(e);
                 alert("Error saving: " + e.message);
@@ -241,10 +282,26 @@
         window.addProject = async () => {
             const title = document.getElementById('admin-proj-title').value;
             const category = document.getElementById('admin-proj-cat').value;
-            const videoUrl = document.getElementById('admin-proj-video').value;
+            let videoUrl = document.getElementById('admin-proj-video').value;
             const thumbnail = document.getElementById('admin-proj-thumb-preview').src;
+            
+            // Check for file upload
+            const fileInput = document.getElementById('admin-proj-file-upload');
+            if (fileInput.files.length > 0) {
+                const file = fileInput.files[0];
+                 if (file.size > 900000) { // ~900KB safety limit
+                    alert("⚠️ Video file too large! Please upload a video smaller than 1MB or use a YouTube URL.");
+                    return;
+                }
+                try {
+                     videoUrl = await readFileAsBase64(file);
+                } catch(e) {
+                    alert("Error reading file");
+                    return;
+                }
+            }
 
-            if (!title || !videoUrl) return alert("Title and Video URL required");
+            if (!title || !videoUrl) return alert("Title and Video (URL or File) required");
 
             const btn = document.getElementById('add-proj-btn');
             btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Adding...';
@@ -259,6 +316,7 @@
                 document.getElementById('admin-proj-video').value = '';
                 document.getElementById('admin-proj-thumb-preview').src = '';
                 document.getElementById('admin-proj-thumb-input').value = '';
+                fileInput.value = "";
             } catch (e) {
                 alert("Error: " + e.message);
             }
@@ -299,8 +357,8 @@
                 const reader = new FileReader();
                 reader.onload = function(e) {
                     // Basic compression/limit check could go here
-                    if(e.target.result.length > 800000) {
-                        alert("Image too large for this demo. Please use a smaller image or an external URL.");
+                    if(e.target.result.length > 900000) {
+                        alert("Image too large (max 900KB). Please use a smaller image or an external URL.");
                         return;
                     }
                     document.getElementById(previewId).src = e.target.result;
@@ -669,7 +727,19 @@
                         <div class="grid gap-4">
                             <input type="text" id="admin-reel-title" placeholder="Title (e.g., Cinematic Showreel 2024)" class="w-full bg-black border border-gray-800 p-3 text-sm text-white focus:border-cyan outline-none">
                             <input type="text" id="admin-reel-subtitle" placeholder="Subtitle" class="w-full bg-black border border-gray-800 p-3 text-sm text-white focus:border-cyan outline-none">
-                            <input type="text" id="admin-reel-video" placeholder="Video URL (YouTube Embed / Vimeo / MP4)" class="w-full bg-black border border-gray-800 p-3 text-sm text-white focus:border-cyan outline-none">
+                            
+                            <!-- Video Source -->
+                            <div>
+                                <label class="text-xs text-gray-500 block mb-1">Video Source (Paste URL OR Upload from Device)</label>
+                                <div class="flex flex-col gap-2">
+                                    <input type="text" id="admin-reel-video" placeholder="Paste YouTube/Vimeo Link" class="w-full bg-black border border-gray-800 p-3 text-sm text-white focus:border-cyan outline-none">
+                                    <div class="text-center text-xs text-gray-600 font-bold uppercase tracking-widest">- OR -</div>
+                                    <div class="relative w-full">
+                                         <input type="file" id="admin-reel-file-upload" accept="video/*" class="w-full bg-gray-900 border border-gray-800 text-gray-400 text-xs p-2 file:bg-gray-800 file:text-white file:border-0 file:mr-3 file:px-2 file:py-1 cursor-pointer">
+                                         <p class="text-[10px] text-red-500 mt-1">* Max 1MB (Short clips/GIFs recommended)</p>
+                                    </div>
+                                </div>
+                            </div>
                             
                             <div class="flex gap-4 items-end">
                                 <div class="flex-1">
@@ -691,7 +761,19 @@
                                 <input type="text" id="admin-proj-title" placeholder="Project Title" class="w-full bg-black border border-gray-800 p-3 text-sm text-white focus:border-cyan outline-none">
                                 <input type="text" id="admin-proj-cat" placeholder="Category (e.g., Music Video)" class="w-full bg-black border border-gray-800 p-3 text-sm text-white focus:border-cyan outline-none">
                             </div>
-                            <input type="text" id="admin-proj-video" placeholder="Project Link / Video URL" class="w-full bg-black border border-gray-800 p-3 text-sm text-white focus:border-cyan outline-none">
+                            
+                            <!-- Video Source -->
+                            <div>
+                                <label class="text-xs text-gray-500 block mb-1">Project Video (Paste URL OR Upload from Device)</label>
+                                <div class="flex flex-col gap-2">
+                                    <input type="text" id="admin-proj-video" placeholder="Project Link / YouTube URL" class="w-full bg-black border border-gray-800 p-3 text-sm text-white focus:border-cyan outline-none">
+                                    <div class="text-center text-xs text-gray-600 font-bold uppercase tracking-widest">- OR -</div>
+                                    <div class="relative w-full">
+                                         <input type="file" id="admin-proj-file-upload" accept="video/*" class="w-full bg-gray-900 border border-gray-800 text-gray-400 text-xs p-2 file:bg-gray-800 file:text-white file:border-0 file:mr-3 file:px-2 file:py-1 cursor-pointer">
+                                         <p class="text-[10px] text-red-500 mt-1">* Max 1MB (Short clips/GIFs recommended)</p>
+                                    </div>
+                                </div>
+                            </div>
                             
                             <div class="flex gap-4 items-end">
                                 <div class="flex-1">
