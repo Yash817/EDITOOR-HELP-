@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MANII28 POV - Cinematic Portfolio</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Inter:wght@300;400;500;700&display=swap" rel="stylesheet">
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Firebase SDKs & Main Logic -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.2.0/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.2.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, deleteDoc, doc, updateDoc, setDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/11.2.0/firebase-firestore.js";
+
+        const firebaseConfig = JSON.parse(new URLSearchParams(window.location.search).get('firebase_config')) || typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app';
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // --- GLOBAL STATE ---
+        let isAdmin = false;
+        const ADMIN_PASS = "PIXCELYASH.SPACE";
+        let unsubscribeProjects = null;
+        let unsubscribeShowreel = null;
+        let allProjects = []; // Store projects locally for editing
+        let isEditing = false;
+        let editingId = null;
+
+        // --- AUTH INIT ---
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth initialization failed", error);
+            }
+        };
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                setupRealtimeListeners();
+            }
+        });
+
+        // --- FIRESTORE LOGIC ---
+        function setupRealtimeListeners() {
+            // 1. Listen for Projects (Reels List)
+            if (!unsubscribeProjects) {
+                const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'reels'));
+                unsubscribeProjects = onSnapshot(q, (snapshot) => {
+                    const workGrid = document.getElementById('work-grid');
+                    if (!workGrid) return;
+
+                    workGrid.innerHTML = ''; 
+                    allProjects = []; 
+                    
+                    const projects = [];
+                    snapshot.forEach((doc) => {
+                        projects.push({ id: doc.id, ...doc.data() });
+                    });
+                    allProjects = projects; // Update local store
+
+                    projects.sort((a, b) => b.createdAt - a.createdAt);
+
+                    if (projects.length === 0) {
+                        workGrid.innerHTML = '<p class="text-neutral-500 col-span-full text-center">No reels uploaded yet.</p>';
+                    }
+
+                    projects.forEach(project => {
+                        const card = createProjectCard(project);
+                        workGrid.appendChild(card);
+                    });
+                    
+                    renderAdminList(projects);
+                }, (error) => console.error("Firestore Error (Projects):", error));
+            }
+
+            // 2. Listen for Latest Reel (Showreel Section)
+            if (!unsubscribeShowreel) {
+                const showreelDoc = doc(db, 'artifacts', appId, 'public', 'data', 'content', 'showreel');
+                unsubscribeShowreel = onSnapshot(showreelDoc, (docSnap) => {
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        updateShowreelUI(data);
+                        fillShowreelForm(data); // Pre-fill admin form if open
+                    }
+                }, (error) => console.error("Firestore Error (Showreel):", error));
+            }
+        }
+
+        // Update Main Website Showreel UI
+        function updateShowreelUI(data) {
+            const container = document.getElementById('video-container');
+            const bg = document.getElementById('showreel-bg');
+            const link = document.getElementById('showreel-link');
+            const title = document.getElementById('showreel-title');
+            const subtitle = document.getElementById('showreel-subtitle');
+
+            if (data.thumbnailUrl) bg.style.backgroundImage = `url('${data.thumbnailUrl}')`;
+            if (data.videoUrl) link.href = data.videoUrl;
+            if (data.title) title.innerText = data.title;
+            if (data.subtitle) subtitle.innerText = data.subtitle;
+        }
+
+        // Fill Admin Form with current data
+        function fillShowreelForm(data) {
+            const titleInput = document.getElementById('sr-title');
+            if (titleInput) {
+                document.getElementById('sr-title').value = data.title || '';
+                document.getElementById('sr-subtitle').value = data.subtitle || '';
+                document.getElementById('sr-thumb-url').value = data.thumbnailUrl || '';
+                document.getElementById('sr-video-url').value = data.videoUrl || '';
+            }
+        }
+
+        // --- UI INITIALIZATION ---
+        function initUI() {
+            const loginModal = document.getElementById('admin-login-modal');
+            const adminPanel = document.getElementById('admin-panel');
+            const passInput = document.getElementById('admin-pass');
+            const loginBtn = document.getElementById('login-btn');
+            const loginError = document.getElementById('login-error');
+            const closeAdminBtn = document.getElementById('close-admin');
+            const adminTrigger = document.getElementById('admin-trigger');
+            const closeLoginBtn = document.getElementById('close-login');
+            
+            // Project Form Elements
+            const projectForm = document.getElementById('project-form');
+            const fileInput = document.getElementById('p-file-thumb');
+            const urlInput = document.getElementById('p-thumb');
+            const videoFileInput = document.getElementById('p-file-video');
+            const videoUrlInput = document.getElementById('p-video');
+            const cancelEditBtn = document.getElementById('cancel-edit');
+
+            // Showreel Form Elements
+            const showreelForm = document.getElementById('showreel-form');
+            const srFileInput = document.getElementById('sr-file-thumb');
+            const srUrlInput = document.getElementById('sr-thumb-url');
+            const srVideoFileInput = document.getElementById('sr-file-video'); // New video file input for showreel
+            const srVideoUrlInput = document.getElementById('sr-video-url');
+
+            // --- Admin Login Flow ---
+            if (adminTrigger) {
+                adminTrigger.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation(); 
+                    if (isAdmin) {
+                        adminPanel.classList.remove('hidden');
+                    } else {
+                        loginModal.classList.remove('hidden');
+                        loginModal.classList.add('flex');
+                    }
+                };
+            }
+
+            if (loginBtn) {
+                loginBtn.onclick = () => {
+                    if (passInput.value === ADMIN_PASS) {
+                        isAdmin = true;
+                        loginModal.classList.add('hidden');
+                        loginModal.classList.remove('flex');
+                        adminPanel.classList.remove('hidden');
+                        passInput.value = '';
+                        loginError.classList.add('hidden');
+                    } else {
+                        loginError.classList.remove('hidden');
+                        passInput.classList.add('border-red-500');
+                    }
+                };
+            }
+
+            if (closeAdminBtn) closeAdminBtn.onclick = () => adminPanel.classList.add('hidden');
+            if (closeLoginBtn) closeLoginBtn.onclick = () => {
+                loginModal.classList.add('hidden');
+                loginModal.classList.remove('flex');
+            };
+
+            // --- File Handlers (Project) ---
+            if (fileInput) {
+                fileInput.onchange = (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onloadend = () => { urlInput.value = reader.result; };
+                        reader.readAsDataURL(file);
+                    }
+                };
+            }
+
+            if (videoFileInput) {
+                videoFileInput.onchange = (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        if (file.size > 1500 * 1024) alert("Warning: Large video file.");
+                        const reader = new FileReader();
+                        reader.onloadend = () => { videoUrlInput.value = reader.result; };
+                        reader.readAsDataURL(file);
+                    }
+                };
+            }
+
+            // --- File Handlers (Showreel) ---
+            if (srFileInput) {
+                srFileInput.onchange = (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onloadend = () => { srUrlInput.value = reader.result; };
+                        reader.readAsDataURL(file);
+                    }
+                };
+            }
+
+            if (srVideoFileInput) {
+                srVideoFileInput.onchange = (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        if (file.size > 1500 * 1024) alert("Warning: Large video file.");
+                        const reader = new FileReader();
+                        reader.onloadend = () => { srVideoUrlInput.value = reader.result; };
+                        reader.readAsDataURL(file);
+                    }
+                };
+            }
+
+            // --- Project Form Submission ---
+            if (projectForm) {
+                projectForm.onsubmit = async (e) => {
+                    e.preventDefault();
+                    if (!auth.currentUser) { alert("Authentication pending..."); return; }
+
+                    const title = document.getElementById('p-title').value;
+                    const category = document.getElementById('p-category').value;
+                    const thumb = document.getElementById('p-thumb').value;
+                    const video = document.getElementById('p-video').value;
+
+                    const data = {
+                        title, category, thumbnailUrl: thumb, videoUrl: video,
+                        createdAt: isEditing ? undefined : Date.now()
+                    };
+
+                    try {
+                        if (isEditing && editingId) {
+                            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'reels', editingId), data);
+                            alert('Updated Successfully!');
+                        } else {
+                            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'reels'), data);
+                            alert('Uploaded Successfully!');
+                        }
+                        resetForm();
+                    } catch (err) {
+                        console.error("Save error:", err);
+                        alert('Error saving data.');
+                    }
+                };
+            }
+
+            // --- Showreel Form Submission ---
+            if (showreelForm) {
+                showreelForm.onsubmit = async (e) => {
+                    e.preventDefault();
+                    if (!auth.currentUser) return;
+
+                    const title = document.getElementById('sr-title').value;
+                    const subtitle = document.getElementById('sr-subtitle').value;
+                    const thumb = document.getElementById('sr-thumb-url').value;
+                    const video = document.getElementById('sr-video-url').value;
+
+                    const data = {
+                        title, subtitle, thumbnailUrl: thumb, videoUrl: video,
+                        updatedAt: Date.now()
+                    };
+
+                    try {
+                        await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'content', 'showreel'), data);
+                        alert('Latest Reel Updated!');
+                    } catch (err) {
+                        console.error("Error updating showreel:", err);
+                        alert('Error updating. Check console.');
+                    }
+                };
+            }
+
+            if (cancelEditBtn) cancelEditBtn.onclick = resetForm;
+
+            function resetForm() {
+                isEditing = false;
+                editingId = null;
+                projectForm.reset();
+                document.getElementById('form-title').innerText = "Add New Reel";
+                document.getElementById('submit-btn').innerText = "Upload Reel";
+                cancelEditBtn.classList.add('hidden');
+            }
+        }
+
+        // Attach Init on load
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initUI);
+        } else {
+            initUI();
+        }
+
+        // --- HELPER FUNCTIONS (Window Scope) ---
+        window.deleteProject = async (id) => {
+            if(confirm('Delete this reel permanently?')) {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'reels', id));
+            }
+        };
+
+        window.startEdit = (id) => {
+            const project = allProjects.find(p => p.id === id);
+            if (!project) return;
+            isEditing = true;
+            editingId = id;
+            document.getElementById('p-title').value = project.title;
+            document.getElementById('p-category').value = project.category;
+            document.getElementById('p-thumb').value = project.thumbnailUrl;
+            document.getElementById('p-video').value = project.videoUrl;
+            document.getElementById('form-title').innerText = "Edit Reel";
+            document.getElementById('submit-btn').innerText = "Update Reel";
+            document.getElementById('cancel-edit').classList.remove('hidden');
+            document.getElementById('admin-panel').scrollTo({ top: 0, behavior: 'smooth' });
+        };
+
+        function createProjectCard(project) {
+            const isDirectFile = project.videoUrl.startsWith('data:');
+            const targetAttr = isDirectFile ? '' : 'target="_blank"';
+            const div = document.createElement('div');
+            div.className = "reveal-on-scroll reveal-visible"; 
+            div.innerHTML = `
+                <div class="group relative w-full aspect-video overflow-hidden rounded-lg bg-neutral-900 cursor-pointer border border-white/5">
+                    <div class="absolute inset-0 bg-cover bg-center transition-transform duration-700 ease-out group-hover:scale-110 group-hover:blur-[2px]" style="background-image: url('${project.thumbnailUrl || 'https://via.placeholder.com/640x360'}')"></div>
+                    <div class="absolute inset-0 bg-black/40 group-hover:bg-black/70 transition-colors duration-500"></div>
+                    <a href="${project.videoUrl}" ${targetAttr} class="absolute inset-0 flex flex-col items-center justify-center opacity-0 group-hover:opacity-100 transition-all duration-500 translate-y-4 group-hover:translate-y-0">
+                        <div class="w-12 h-12 md:w-16 md:h-16 rounded-full border border-white/30 flex items-center justify-center backdrop-blur-md bg-white/10 mb-3 md:mb-4 transform group-hover:scale-110 transition-transform duration-300">
+                            <i data-lucide="play" class="w-5 h-5 md:w-6 md:h-6 text-white fill-white"></i>
+                        </div>
+                        <h3 class="text-lg md:text-2xl font-bold text-white tracking-wider uppercase font-display text-center px-4">${project.title}</h3>
+                        <p class="text-cyan-400 text-[10px] md:text-sm tracking-widest mt-1 md:mt-2 font-medium">${project.category}</p>
+                    </a>
+                </div>
+            `;
+            return div;
+        }
+
+        function renderAdminList(projects) {
+            const list = document.getElementById('admin-project-list');
+            if(!list) return; 
+            list.innerHTML = '';
+            projects.forEach(p => {
+                const item = document.createElement('div');
+                item.className = "flex items-center justify-between bg-neutral-900 p-3 rounded border border-white/10 mb-2";
+                item.innerHTML = `
+                    <div class="flex items-center gap-3 overflow-hidden">
+                        <img src="${p.thumbnailUrl}" class="w-10 h-10 object-cover rounded bg-neutral-800">
+                        <div>
+                            <p class="font-bold text-sm truncate text-white">${p.title}</p>
+                            <p class="text-xs text-neutral-500">${p.category}</p>
+                        </div>
+                    </div>
+                    <div class="flex gap-2">
+                        <button class="text-cyan-500 hover:text-cyan-400 p-2" onclick="window.startEdit('${p.id}')">
+                            <i data-lucide="edit-2" class="w-4 h-4"></i>
+                        </button>
+                        <button class="text-red-500 hover:text-red-400 p-2" onclick="window.deleteProject('${p.id}')">
+                            <i data-lucide="trash-2" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                `;
+                list.appendChild(item);
+            });
+            setTimeout(() => lucide.createIcons(), 100);
+        }
+    </script>
+
+    <!-- Custom Config for Tailwind -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        display: ['Cinzel', 'serif'],
+                        mono: ['Courier New', 'monospace'],
+                    },
+                    colors: {
+                        cyan: {
+                            400: '#22d3ee',
+                            500: '#06b6d4',
+                            900: '#164e63',
+                        }
+                    },
+                    animation: {
+                        'spin-slow': 'spin 30s linear infinite',
+                        'pulse-slow': 'pulse 10s ease-in-out infinite',
+                        'fade-in': 'fade-in 2s ease-out forwards',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body {
+            background-color: #050505;
+            color: white;
+            overflow-x: hidden;
+        }
+
+        /* --- CAMERA PRELOADER --- */
+        #preloader {
+            position: fixed; inset: 0; background-color: #050505; z-index: 9999;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            transform-origin: center center; will-change: transform, opacity, filter;
+            transition: opacity 0.5s ease-out, visibility 0.5s;
+        }
+        .preloader-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+        
+        .cam-corner { position: absolute; width: 40px; height: 40px; border-color: rgba(255, 255, 255, 0.4); border-style: solid; transition: all 0.5s ease-out; }
+        .tl { top: 2rem; left: 2rem; border-width: 2px 0 0 2px; }
+        .tr { top: 2rem; right: 2rem; border-width: 2px 2px 0 0; }
+        .bl { bottom: 2rem; left: 2rem; border-width: 0 0 2px 2px; }
+        .br { bottom: 2rem; right: 2rem; border-width: 0 2px 2px 0; }
+        .crosshair { width: 20px; height: 20px; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); border: 1px solid rgba(255,255,255,0.3); border-radius: 50%; }
+        .crosshair::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 2px; height: 2px; background: white; }
+        .rec-dot { width: 10px; height: 10px; background-color: #ef4444; border-radius: 50%; animation: blinkRed 1s infinite; display: inline-block; margin-right: 8px; }
+        @keyframes blinkRed { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+        .zoom-exit { animation: zoomThrough 1s cubic-bezier(0.65, 0, 0.35, 1) forwards; }
+        @keyframes zoomThrough { 0% { transform: scale(1); opacity: 1; filter: blur(0); } 40% { opacity: 1; filter: blur(0); } 100% { transform: scale(8); opacity: 0; filter: blur(15px); } }
+        .focus-in { animation: focusInText 1.8s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards; will-change: letter-spacing, filter, opacity; }
+        @keyframes focusInText { 0% { letter-spacing: -0.5em; filter: blur(12px); opacity: 0; } 100% { letter-spacing: normal; filter: blur(0); opacity: 1; } }
+        .designer-credit { font-family: 'Inter', sans-serif; font-weight: 500; background: linear-gradient(90deg, #22d3ee, #fff, #22d3ee); background-size: 200% auto; color: transparent; -webkit-background-clip: text; background-clip: text; animation: shimmer 3s linear infinite; }
+        @keyframes shimmer { to { background-position: 200% center; } }
+        
+        /* Effects */
+        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+        .reveal-hidden { opacity: 0; transform: translateY(30px); filter: blur(2px); }
+        .reveal-visible { opacity: 1; transform: translateY(0); filter: blur(0); transition: all 1s cubic-bezier(0.16, 1, 0.3, 1); }
+        .skill-bar-fill { width: 0%; transition: width 1.5s ease-out; }
+        .custom-scroll::-webkit-scrollbar { width: 4px; }
+        .custom-scroll::-webkit-scrollbar-track { background: #111; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: #22d3ee; }
+    </style>
+</head>
+<body class="selection:bg-cyan-500/30">
+
+    <!-- CINEMATIC CAMERA PRELOADER -->
+    <div id="preloader">
+        <div class="cam-corner tl"></div>
+        <div class="cam-corner tr"></div>
+        <div class="cam-corner bl"></div>
+        <div class="cam-corner br"></div>
+        <div class="absolute top-10 left-12 flex items-center font-mono text-xs md:text-sm text-white tracking-widest"><span class="rec-dot"></span> REC</div>
+        <div class="absolute top-10 right-12 font-mono text-xs md:text-sm text-white/60 tracking-widest">4K 60FPS</div>
+        <div class="absolute bottom-10 left-12 font-mono text-xs md:text-sm text-white/60 tracking-widest">ISO 800</div>
+        <div class="absolute bottom-10 right-12 font-mono text-xs md:text-sm text-white/60 tracking-widest">SHUTTER 1/50</div>
+        <div class="crosshair opacity-30"></div>
+        <div class="text-center z-10">
+            <h1 class="text-5xl md:text-8xl font-bold font-display tracking-tighter mb-4 text-white focus-in">MANII28 POV</h1>
+            <p class="designer-credit text-xs md:text-sm tracking-[0.3em] uppercase opacity-0 animate-fade-in" style="animation-delay: 1s;">PIXCELYASH.SPACE PRESENTS</p>
+        </div>
+    </div>
+
+    <!-- MAIN APP -->
+    <div id="app" class="opacity-1">
+        <!-- GLOBAL FX -->
+        <div class="fixed inset-0 opacity-[0.07] pointer-events-none z-[60] mix-blend-overlay bg-[url('https://grainy-gradients.vercel.app/noise.svg')]"></div>
+        <div class="fixed inset-0 pointer-events-none z-[59] bg-[radial-gradient(circle_at_center,transparent_0%,rgba(0,0,0,0.5)_100%)]"></div>
+
+        <!-- NAV -->
+        <nav class="fixed top-0 left-0 w-full z-50 px-4 md:px-6 py-4 md:py-6 mix-blend-difference text-white backdrop-blur-[2px]">
+            <div class="max-w-7xl mx-auto flex justify-between items-center">
+                <div class="text-lg md:text-2xl font-bold tracking-tighter font-display cursor-pointer group" onclick="window.scrollTo(0,0)">
+                    MANII28<span class="text-neutral-500 group-hover:text-cyan-400 transition-colors">POV</span>
+                </div>
+                <!-- Desktop Menu -->
+                <div class="hidden md:flex space-x-8 items-center">
+                    <a href="#work" class="text-xs lg:text-sm uppercase tracking-widest hover:text-cyan-400 transition-all duration-300 relative group">Work<span class="absolute -bottom-2 left-0 w-0 h-[1px] bg-cyan-400 transition-all duration-300 group-hover:w-full"></span></a>
+                    <a href="#showreel" class="text-xs lg:text-sm uppercase tracking-widest hover:text-cyan-400 transition-all duration-300 relative group">Showreel<span class="absolute -bottom-2 left-0 w-0 h-[1px] bg-cyan-400 transition-all duration-300 group-hover:w-full"></span></a>
+                    <a href="#skills" class="text-xs lg:text-sm uppercase tracking-widest hover:text-cyan-400 transition-all duration-300 relative group">Skills<span class="absolute -bottom-2 left-0 w-0 h-[1px] bg-cyan-400 transition-all duration-300 group-hover:w-full"></span></a>
+                    <a href="#about" class="text-xs lg:text-sm uppercase tracking-widest hover:text-cyan-400 transition-all duration-300 relative group">About<span class="absolute -bottom-2 left-0 w-0 h-[1px] bg-cyan-400 transition-all duration-300 group-hover:w-full"></span></a>
+                    <a href="#contact" class="text-xs lg:text-sm uppercase tracking-widest hover:text-cyan-400 transition-all duration-300 relative group">Contact<span class="absolute -bottom-2 left-0 w-0 h-[1px] bg-cyan-400 transition-all duration-300 group-hover:w-full"></span></a>
+                    <button onclick="document.getElementById('contact').scrollIntoView()" class="px-5 py-2 border border-white/20 hover:border-cyan-400 hover:text-cyan-400 hover:shadow-[0_0_15px_rgba(34,211,238,0.3)] transition-all duration-300 uppercase text-[10px] lg:text-xs tracking-widest backdrop-blur-sm">Hire Me</button>
+                </div>
+                <button id="mobile-menu-btn" class="md:hidden text-white p-1"><i data-lucide="layers" class="rotate-90 w-6 h-6"></i></button>
+            </div>
+        </nav>
+
+        <!-- MOBILE MENU -->
+        <div id="mobile-menu" class="fixed inset-0 bg-black/95 z-40 flex-col items-center justify-center space-y-6 md:space-y-8 backdrop-blur-xl hidden transition-all duration-500">
+            <button id="mobile-menu-close" class="absolute top-6 right-6 text-white p-2"><i data-lucide="x" class="w-8 h-8"></i></button>
+            <a href="#work" class="mobile-link text-xl md:text-2xl font-display font-bold uppercase tracking-widest hover:text-cyan-400 transition-colors">Work</a>
+            <a href="#showreel" class="mobile-link text-xl md:text-2xl font-display font-bold uppercase tracking-widest hover:text-cyan-400 transition-colors">Showreel</a>
+            <a href="#skills" class="mobile-link text-xl md:text-2xl font-display font-bold uppercase tracking-widest hover:text-cyan-400 transition-colors">Skills</a>
+            <a href="#about" class="mobile-link text-xl md:text-2xl font-display font-bold uppercase tracking-widest hover:text-cyan-400 transition-colors">About</a>
+            <a href="#contact" class="mobile-link text-xl md:text-2xl font-display font-bold uppercase tracking-widest hover:text-cyan-400 transition-colors">Contact</a>
+        </div>
+
+        <!-- HERO -->
+        <header class="relative h-screen flex items-center justify-center overflow-hidden">
+            <div class="absolute inset-0 bg-black">
+                <div class="absolute inset-0 bg-gradient-to-br from-purple-900/20 via-black to-cyan-900/20 animate-pulse-slow"></div>
+                <div class="absolute top-[-50%] left-[-50%] w-[200%] h-[200%] bg-[radial-gradient(circle,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[length:40px_40px] animate-spin-slow opacity-40"></div>
+                <div class="absolute bottom-0 left-0 w-full h-48 md:h-64 bg-gradient-to-t from-[#050505] to-transparent"></div>
+            </div>
+            <div class="relative z-10 text-center px-4 max-w-5xl mx-auto w-full mt-10 md:mt-0">
+                <div class="reveal-on-scroll">
+                    <h2 class="text-cyan-500 tracking-[0.3em] md:tracking-[0.4em] uppercase text-[10px] md:text-sm font-bold mb-3 md:mb-6 animate-fade-in">Professional Video Editor</h2>
+                </div>
+                <div class="reveal-on-scroll" style="transition-delay: 200ms;">
+                    <h1 class="text-3xl md:text-6xl lg:text-7xl font-bold leading-tight md:leading-none tracking-tighter mb-6 md:mb-8 font-display bg-clip-text text-transparent bg-gradient-to-b from-white via-white to-neutral-500 drop-shadow-[0_0_25px_rgba(255,255,255,0.2)]">CRAFTING STORIES<br/>THROUGH MOTION</h1>
+                </div>
+                <div class="reveal-on-scroll" style="transition-delay: 400ms;">
+                    <p class="text-neutral-400 max-w-xl mx-auto mb-8 md:mb-10 text-xs md:text-base leading-relaxed px-4 font-light">Transforming raw footage into immersive cinematic experiences. Specializing in Gaming Edits, Insta Reels, and High-End Commercials.</p>
+                </div>
+                <div class="reveal-on-scroll" style="transition-delay: 600ms;">
+                    <div class="flex flex-col sm:flex-row items-center justify-center gap-4 md:gap-6">
+                        <a href="#showreel" class="group relative px-6 py-3 md:px-8 md:py-4 bg-white text-black font-bold tracking-widest uppercase hover:bg-cyan-400 transition-colors duration-300 cursor-pointer w-full sm:w-auto flex justify-center text-xs md:text-sm"><span class="relative z-10 flex items-center gap-2">View Showreel <i data-lucide="play" class="w-3 h-3 md:w-4 md:h-4"></i></span><div class="absolute inset-0 blur-lg bg-white/50 group-hover:bg-cyan-400/50 transition-colors opacity-0 group-hover:opacity-100 duration-300"></div></a>
+                        <button onclick="document.getElementById('contact').scrollIntoView()" class="w-full sm:w-auto px-6 py-3 md:px-8 md:py-4 border border-white/20 hover:border-white hover:bg-white/5 transition-all duration-300 uppercase tracking-widest text-xs md:text-sm backdrop-blur-sm">Available for Hire</button>
+                    </div>
+                </div>
+            </div>
+            <div class="absolute bottom-6 md:bottom-12 left-1/2 -translate-x-1/2 animate-bounce opacity-50"><i data-lucide="chevron-down" class="w-5 h-5 md:w-6 md:h-6 text-white"></i></div>
+        </header>
+
+        <!-- SHOWREEL -->
+        <section id="showreel" class="py-16 md:py-24 relative overflow-hidden">
+            <div class="max-w-7xl mx-auto px-4 md:px-6">
+                <div class="reveal-on-scroll">
+                    <div class="flex items-center justify-between mb-8 md:mb-12">
+                        <h2 class="text-2xl md:text-4xl lg:text-5xl font-display font-bold">LATEST REEL</h2>
+                        <div class="h-[1px] flex-1 bg-white/10 ml-8 hidden md:block"></div>
+                    </div>
+                </div>
+                <div class="reveal-on-scroll" style="transition-delay: 200ms;">
+                    <div id="video-container" class="relative aspect-video bg-neutral-900 rounded-xl overflow-hidden border border-white/10 group cursor-pointer shadow-[0_0_30px_rgba(0,0,0,0.3)] md:shadow-[0_0_50px_rgba(0,0,0,0.5)]">
+                        <div id="showreel-bg" class="absolute inset-0 bg-cover bg-center transition-transform duration-1000 group-hover:scale-105 bg-[url('https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=2525&auto=format&fit=crop')]"></div>
+                        <div class="absolute inset-0 bg-black/40 group-hover:bg-black/20 transition-colors duration-500"></div>
+                        <a id="showreel-link" href="#" target="_blank" class="absolute inset-0 flex items-center justify-center">
+                            <div class="w-16 h-16 md:w-24 md:h-24 rounded-full border-2 border-white/30 flex items-center justify-center backdrop-blur-sm group-hover:scale-110 group-hover:bg-white group-hover:border-white transition-all duration-300 shadow-[0_0_30px_rgba(0,0,0,0.5)]"><i data-lucide="play" class="w-6 h-6 md:w-8 md:h-8 text-white ml-1 group-hover:text-black transition-colors fill-current"></i></div>
+                        </a>
+                        <div class="absolute bottom-4 left-4 md:bottom-8 md:left-8">
+                            <p id="showreel-subtitle" class="text-[10px] md:text-xs font-bold text-cyan-400 tracking-widest uppercase mb-1">Showreel 2025</p>
+                            <p id="showreel-title" class="text-base md:text-xl text-white font-medium">Visual Storytelling Montage</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- WORK (DYNAMIC) -->
+        <section id="work" class="py-16 md:py-24 bg-neutral-950/50">
+            <div class="max-w-7xl mx-auto px-4 md:px-6">
+                <div class="reveal-on-scroll text-center mb-10 md:mb-16">
+                    <span class="text-cyan-500 uppercase tracking-widest text-[10px] md:text-xs font-bold">Selected Works</span>
+                    <h2 class="text-2xl md:text-5xl font-display font-bold mt-2 md:mt-4 mb-4 md:mb-6">FEATURED PROJECTS</h2>
+                    <p class="text-neutral-400 max-w-xl mx-auto text-xs md:text-base px-2">A collection of music videos, commercials, and short films crafted with precision.</p>
+                </div>
+                <!-- Dynamic Grid -->
+                <div id="work-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-8">
+                    <!-- Default items (will be cleared by JS) -->
+                </div>
+            </div>
+        </section>
+
+        <!-- SKILLS -->
+        <section id="skills" class="py-16 md:py-24 relative">
+            <div class="max-w-6xl mx-auto px-4 md:px-6 flex flex-col md:flex-row gap-10 md:gap-16">
+                <div class="md:w-1/2">
+                    <div class="reveal-on-scroll">
+                        <h2 class="text-2xl md:text-4xl font-display font-bold mb-4 md:mb-6">TECHNICAL ARSENAL</h2>
+                        <p class="text-neutral-400 mb-8 md:mb-10 leading-relaxed text-xs md:text-base">Proficiency in industry-standard software combined with a deep understanding of pacing, rhythm, and color theory allows me to handle complex post-production workflows.</p>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3 md:gap-6 mb-8 md:mb-10">
+                        <div class="reveal-on-scroll" style="transition-delay: 200ms;"><div class="p-4 bg-neutral-900/50 border border-white/5 rounded-lg text-center hover:border-cyan-500/50 transition-colors"><i data-lucide="film" class="w-6 h-6 md:w-8 md:h-8 mx-auto mb-2 md:mb-3 text-cyan-400"></i><h4 class="font-bold text-xs md:text-base">Gaming Edits</h4></div></div>
+                        <div class="reveal-on-scroll" style="transition-delay: 300ms;"><div class="p-4 bg-neutral-900/50 border border-white/5 rounded-lg text-center hover:border-cyan-500/50 transition-colors"><i data-lucide="instagram" class="w-6 h-6 md:w-8 md:h-8 mx-auto mb-2 md:mb-3 text-purple-400"></i><h4 class="font-bold text-xs md:text-base">Insta Reels</h4></div></div>
+                        <div class="reveal-on-scroll" style="transition-delay: 400ms;"><div class="p-4 bg-neutral-900/50 border border-white/5 rounded-lg text-center hover:border-cyan-500/50 transition-colors"><i data-lucide="layers" class="w-6 h-6 md:w-8 md:h-8 mx-auto mb-2 md:mb-3 text-yellow-400"></i><h4 class="font-bold text-xs md:text-base">VFX</h4></div></div>
+                        <div class="reveal-on-scroll" style="transition-delay: 500ms;"><div class="p-4 bg-neutral-900/50 border border-white/5 rounded-lg text-center hover:border-cyan-500/50 transition-colors"><i data-lucide="music" class="w-6 h-6 md:w-8 md:h-8 mx-auto mb-2 md:mb-3 text-pink-400"></i><h4 class="font-bold text-xs md:text-base">Sound Design</h4></div></div>
+                    </div>
+                </div>
+                <div class="md:w-1/2 flex flex-col justify-center">
+                    <div class="skill-bar-container mb-6 reveal-on-scroll" data-level="95"><div class="flex justify-between items-end mb-2"><span class="text-neutral-300 font-medium tracking-wide uppercase text-xs md:text-sm">Adobe Premiere Pro</span><span class="text-cyan-400 text-[10px] md:text-xs font-mono">95%</span></div><div class="h-1 w-full bg-neutral-800 rounded-full overflow-hidden"><div class="skill-bar-fill h-full bg-gradient-to-r from-cyan-600 to-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.5)]"></div></div></div>
+                    <div class="skill-bar-container mb-6 reveal-on-scroll" data-level="90"><div class="flex justify-between items-end mb-2"><span class="text-neutral-300 font-medium tracking-wide uppercase text-xs md:text-sm">Gaming Montage</span><span class="text-cyan-400 text-[10px] md:text-xs font-mono">90%</span></div><div class="h-1 w-full bg-neutral-800 rounded-full overflow-hidden"><div class="skill-bar-fill h-full bg-gradient-to-r from-cyan-600 to-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.5)]"></div></div></div>
+                    <div class="skill-bar-container mb-6 reveal-on-scroll" data-level="88"><div class="flex justify-between items-end mb-2"><span class="text-neutral-300 font-medium tracking-wide uppercase text-xs md:text-sm">DaVinci Resolve</span><span class="text-cyan-400 text-[10px] md:text-xs font-mono">88%</span></div><div class="h-1 w-full bg-neutral-800 rounded-full overflow-hidden"><div class="skill-bar-fill h-full bg-gradient-to-r from-cyan-600 to-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.5)]"></div></div></div>
+                    <div class="skill-bar-container mb-6 reveal-on-scroll" data-level="82"><div class="flex justify-between items-end mb-2"><span class="text-neutral-300 font-medium tracking-wide uppercase text-xs md:text-sm">After Effects</span><span class="text-cyan-400 text-[10px] md:text-xs font-mono">82%</span></div><div class="h-1 w-full bg-neutral-800 rounded-full overflow-hidden"><div class="skill-bar-fill h-full bg-gradient-to-r from-cyan-600 to-cyan-400 shadow-[0_0_10px_rgba(34,211,238,0.5)]"></div></div></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ABOUT -->
+        <section id="about" class="py-16 md:py-24 bg-neutral-900/30">
+            <div class="max-w-7xl mx-auto px-4 md:px-6 flex flex-col md:flex-row items-center gap-10 md:gap-12">
+                <div class="md:w-1/2 relative w-full px-4 md:px-0">
+                    <div class="reveal-on-scroll">
+                        <div class="relative aspect-[3/4] rounded-lg overflow-hidden max-w-[280px] md:max-w-sm mx-auto md:max-w-full shadow-2xl">
+                            <img src="https://i.postimg.cc/DfCFZWbh/Whats-App-Image-2026-01-06-at-8-43-57-PM.jpg" alt="Mani28 POV" class="object-cover w-full h-full grayscale hover:grayscale-0 transition-all duration-700">
+                            <div class="absolute top-0 -left-1/2 w-full h-full bg-gradient-to-r from-cyan-500/20 to-transparent blur-3xl opacity-50 mix-blend-screen"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="md:w-1/2 text-center md:text-left">
+                    <div class="reveal-on-scroll" style="transition-delay: 200ms;">
+                        <span class="text-cyan-500 uppercase tracking-widest text-[10px] md:text-xs font-bold block mb-3 md:mb-4">About Me</span>
+                        <h2 class="text-2xl md:text-5xl font-display font-bold mb-4 md:mb-8">MANII28 POV</h2>
+                        <p class="text-neutral-300 text-sm md:text-lg leading-relaxed mb-4 md:mb-6 font-light">I am a cinematic video editor obsessed with <span class="text-white font-medium">storytelling, emotion, and visual impact</span>. I specialize in turning raw gaming clips and lifestyle footage into viral-ready masterpieces.</p>
+                        <p class="text-neutral-400 leading-relaxed mb-6 md:mb-8 text-xs md:text-base">With over 7 years of experience working with creators and brands, I bring a unique "film look" aesthetic to every project. Whether it's a high-energy gaming montage or a moody instagram reel, I elevate your vision.</p>
+                        <img src="https://upload.wikimedia.org/wikipedia/commons/e/e4/Signature_sample.svg" alt="Signature" class="h-12 md:h-16 opacity-50 invert mx-auto md:mx-0">
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- CONTACT -->
+        <section id="contact" class="py-16 md:py-24 relative overflow-hidden">
+            <div class="absolute bottom-0 right-0 w-[250px] h-[250px] md:w-[500px] md:h-[500px] bg-cyan-900/20 blur-[80px] md:blur-[120px] rounded-full pointer-events-none"></div>
+            <div class="max-w-4xl mx-auto px-4 md:px-6 relative z-10">
+                <div class="reveal-on-scroll">
+                    <div class="text-center mb-10 md:mb-16">
+                        <h2 class="text-3xl md:text-7xl font-display font-bold mb-3 md:mb-4">LET'S CREATE</h2>
+                        <p class="text-sm md:text-xl text-neutral-400">Have a project in mind? Let's bring it to life.</p>
+                    </div>
+                </div>
+                <div class="reveal-on-scroll" style="transition-delay: 200ms;">
+                    <form id="contact-form" class="space-y-4 md:space-y-6">
+                        <div class="grid md:grid-cols-2 gap-4 md:gap-6">
+                            <div class="group relative"><input type="text" id="name" placeholder="Name" class="w-full bg-neutral-900/50 border border-white/10 p-3 md:p-4 rounded-lg focus:outline-none focus:border-cyan-500 transition-colors text-white placeholder-neutral-600 text-sm md:text-base" required></div>
+                            <div class="group relative"><input type="email" id="email" placeholder="Email (Optional)" class="w-full bg-neutral-900/50 border border-white/10 p-3 md:p-4 rounded-lg focus:outline-none focus:border-cyan-500 transition-colors text-white placeholder-neutral-600 text-sm md:text-base"></div>
+                        </div>
+                        <div>
+                            <select id="project-type" class="w-full bg-neutral-900/50 border border-white/10 p-3 md:p-4 rounded-lg focus:outline-none focus:border-cyan-500 transition-colors text-white/50 text-sm md:text-base">
+                                <option value="Collaboration">Select Project Type</option>
+                                <option value="Insta Video Creation">Insta Video Creation</option>
+                                <option value="Gaming Video Editing">Gaming Video Editing</option>
+                                <option value="Music Video">Music Video</option>
+                                <option value="Commercial">Commercial</option>
+                                <option value="YouTube Content">YouTube Content</option>
+                            </select>
+                        </div>
+                        <div><textarea id="message" rows="5" placeholder="Tell me about your vision..." class="w-full bg-neutral-900/50 border border-white/10 p-3 md:p-4 rounded-lg focus:outline-none focus:border-cyan-500 transition-colors text-white placeholder-neutral-600 text-sm md:text-base" required></textarea></div>
+                        <button type="submit" class="w-full py-4 md:py-5 bg-white text-black font-bold uppercase tracking-widest hover:bg-cyan-400 transition-all duration-300 shadow-[0_0_20px_rgba(255,255,255,0.1)] hover:shadow-[0_0_30px_rgba(34,211,238,0.4)] text-sm md:text-base">Send Message on WhatsApp</button>
+                    </form>
+                </div>
+                <div class="reveal-on-scroll" style="transition-delay: 400ms;">
+                    <div class="flex justify-center gap-6 md:gap-8 mt-12 md:mt-16">
+                        <a href="https://www.instagram.com/maniish.pandit__?igsh=MWo5ZDJiZDRybGZkbQ==" target="_blank" class="text-neutral-500 hover:text-white hover:scale-110 transition-all duration-300"><i data-lucide="instagram" class="w-5 h-5 md:w-6 md:h-6"></i></a>
+                        <a href="#" class="text-neutral-500 hover:text-white hover:scale-110 transition-all duration-300"><i data-lucide="twitter" class="w-5 h-5 md:w-6 md:h-6"></i></a>
+                        <a href="#" class="text-neutral-500 hover:text-white hover:scale-110 transition-all duration-300"><i data-lucide="youtube" class="w-5 h-5 md:w-6 md:h-6"></i></a>
+                        <a href="#" class="text-neutral-500 hover:text-white hover:scale-110 transition-all duration-300"><i data-lucide="mail" class="w-5 h-5 md:w-6 md:h-6"></i></a>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- FOOTER -->
+        <footer class="py-8 md:py-12 border-t border-white/5 text-center text-neutral-600 text-xs md:text-sm relative z-[70]">
+            <div class="max-w-7xl mx-auto px-6 flex flex-col md:flex-row justify-between items-center gap-4">
+                <p>&copy; 2025 MANII28 POV. All rights reserved.</p>
+                <div class="flex flex-col items-center md:items-end">
+                    <p class="tracking-widest uppercase text-[10px] md:text-xs mb-1">Turning Vision Into Motion</p>
+                    <p class="text-[10px] md:text-[11px] text-cyan-400 font-medium tracking-wide drop-shadow-[0_0_8px_rgba(34,211,238,0.5)]">DESIGN AND DEVELOP BY PIXCELYASH.SPACE</p>
+                    <!-- Admin Trigger -->
+                    <button id="admin-trigger" class="text-[10px] text-neutral-500 hover:text-cyan-400 mt-4 tracking-widest border border-white/5 px-3 py-1 rounded hover:border-cyan-500/30 transition-all duration-300 cursor-pointer relative z-[100]">ADMIN ACCESS</button>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- ADMIN LOGIN -->
+    <div id="admin-login-modal" class="fixed inset-0 bg-black/95 z-[999] hidden items-center justify-center backdrop-blur-md">
+        <div class="bg-neutral-900 p-8 rounded-lg border border-white/10 w-full max-w-md relative">
+            <button id="close-login" class="absolute top-4 right-4 text-neutral-500 hover:text-white"><i data-lucide="x"></i></button>
+            <h2 class="text-2xl font-bold font-display mb-6 text-center">ACCESS CONTROL</h2>
+            <input type="password" id="admin-pass" placeholder="Enter Passcode" class="w-full bg-neutral-800 border border-white/5 p-3 rounded mb-4 focus:outline-none focus:border-cyan-500 text-white placeholder-neutral-500">
+            <p id="login-error" class="text-red-500 text-xs mb-4 hidden">Access Denied.</p>
+            <button id="login-btn" class="w-full py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-bold uppercase tracking-widest transition-colors">Unlock</button>
+        </div>
+    </div>
+
+    <!-- ADMIN DASHBOARD -->
+    <div id="admin-panel" class="fixed inset-0 bg-black z-[998] hidden overflow-auto">
+        <div class="max-w-6xl mx-auto p-6">
+            <div class="flex justify-between items-center mb-8 border-b border-white/10 pb-4">
+                <h2 class="text-3xl font-display font-bold text-white"><span class="text-cyan-500">ADMIN</span> DASHBOARD</h2>
+                <button id="close-admin" class="text-sm border border-white/20 px-4 py-2 hover:bg-white hover:text-black transition-colors uppercase tracking-widest">Exit</button>
+            </div>
+            
+            <div class="grid lg:grid-cols-2 gap-8">
+                <!-- 1. MANAGE LATEST REEL -->
+                <div class="bg-neutral-900/50 p-6 rounded-lg border border-white/5">
+                    <h3 class="text-xl font-bold mb-4 flex items-center gap-2 text-cyan-400"><i data-lucide="star" class="w-5 h-5"></i> Manage Latest Reel</h3>
+                    <form id="showreel-form" class="space-y-4">
+                        <div>
+                            <label class="text-xs uppercase text-neutral-500 tracking-widest block mb-1">Title</label>
+                            <input type="text" id="sr-title" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white" placeholder="Visual Storytelling Montage">
+                        </div>
+                        <div>
+                            <label class="text-xs uppercase text-neutral-500 tracking-widest block mb-1">Subtitle (Year/Tag)</label>
+                            <input type="text" id="sr-subtitle" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white" placeholder="Showreel 2025">
+                        </div>
+                        <div>
+                            <label class="text-xs uppercase text-neutral-500 tracking-widest block mb-1">Thumbnail (Upload File)</label>
+                            <input type="file" id="sr-file-thumb" accept="image/*" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white text-xs mb-2">
+                            <input type="text" id="sr-thumb-url" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white text-xs" placeholder="OR Paste Image URL here" required>
+                        </div>
+                        <div>
+                            <label class="text-xs uppercase text-neutral-500 tracking-widest block mb-1">Video (Upload File or URL)</label>
+                            <input type="file" id="sr-file-video" accept="video/*" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white text-xs mb-2">
+                            <input type="url" id="sr-video-url" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white" placeholder="OR Paste Video URL here" required>
+                            <p class="text-[10px] text-neutral-500 mt-1">Note: Direct upload limited to very small files. Use URL for best results.</p>
+                        </div>
+                        <button type="submit" class="w-full py-3 bg-cyan-600 text-white font-bold uppercase hover:bg-cyan-500 transition-colors mt-2">Update Latest Reel</button>
+                    </form>
+                </div>
+
+                <!-- 2. ADD NEW PROJECT -->
+                <div class="bg-neutral-900/50 p-6 rounded-lg border border-white/5">
+                    <h3 id="form-title" class="text-xl font-bold mb-4 flex items-center gap-2"><i data-lucide="plus-circle" class="text-cyan-500"></i> Add New Project</h3>
+                    <form id="project-form" class="space-y-4">
+                        <div>
+                            <label class="text-xs uppercase text-neutral-500 tracking-widest block mb-1">Title</label>
+                            <input type="text" id="p-title" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white" placeholder="e.g. Neon Nights" required>
+                        </div>
+                        <div>
+                            <label class="text-xs uppercase text-neutral-500 tracking-widest block mb-1">Category</label>
+                            <select id="p-category" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white">
+                                <option>Gaming Video Editing</option>
+                                <option>Insta Video Creation</option>
+                                <option>Music Video</option>
+                                <option>Commercial</option>
+                                <option>Short Film</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-xs uppercase text-neutral-500 tracking-widest block mb-1">Thumbnail (Upload File)</label>
+                            <input type="file" id="p-file-thumb" accept="image/*" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white text-xs mb-2">
+                            <input type="text" id="p-thumb" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white text-xs" placeholder="OR Paste Image URL here" required>
+                        </div>
+                        <div>
+                            <label class="text-xs uppercase text-neutral-500 tracking-widest block mb-1">Video (Upload File or URL)</label>
+                            <input type="file" id="p-file-video" accept="video/*" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white text-xs mb-2">
+                            <input type="url" id="p-video" class="w-full bg-black border border-white/10 p-3 rounded focus:border-cyan-500 focus:outline-none text-white" placeholder="OR Paste Video URL here" required>
+                            <p class="text-[10px] text-neutral-500 mt-1">Note: Direct upload limited to very small files (approx 1MB). Use URL for best results.</p>
+                        </div>
+                        <div class="flex gap-2">
+                            <button type="submit" id="submit-btn" class="flex-1 py-3 bg-white text-black font-bold uppercase hover:bg-cyan-400 transition-colors mt-2">Upload Reel</button>
+                            <button type="button" id="cancel-edit" class="hidden flex-1 py-3 border border-white/20 text-white font-bold uppercase hover:bg-white/10 transition-colors mt-2">Cancel</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- 3. PROJECT LIST -->
+            <div class="mt-8 bg-neutral-900/50 p-6 rounded-lg border border-white/5 h-[400px] overflow-y-auto custom-scroll">
+                <h3 class="text-xl font-bold mb-4 flex items-center gap-2"><i data-lucide="list" class="text-cyan-500"></i> Manage Reels</h3>
+                <div id="admin-project-list" class="space-y-3">
+                    <p class="text-neutral-500 text-sm">Loading projects...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SCRIPTS -->
+    <script>
+        // Init Icons on load
+        lucide.createIcons();
+        
+        // Preloader Logic with Robust Failsafe
+        const preloader = document.getElementById('preloader');
+
+        function hidePreloader() {
+            // Prevent multiple triggers
+            if (preloader.classList.contains('zoom-exit') || preloader.style.display === 'none') return;
+            
+            preloader.classList.add('zoom-exit');
+            
+            // Hard remove from DOM after animation
+            setTimeout(() => { 
+                preloader.style.display = 'none'; 
+                preloader.style.visibility = 'hidden';
+            }, 1000); 
+        }
+
+        // 1. Trigger on Window Load
+        window.addEventListener('load', () => {
+            setTimeout(hidePreloader, 1500); // Faster load (1.5s)
+        });
+
+        // 2. Failsafe: Force close after 4 seconds max if window.load hangs
+        setTimeout(hidePreloader, 4000);
+
+        // 3. Immediate check if page is already loaded (for cached reloads)
+        if (document.readyState === 'complete') {
+            setTimeout(hidePreloader, 500);
+        }
+
+        // Mobile Menu
+        const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+        const mobileMenu = document.getElementById('mobile-menu');
+        const mobileMenuClose = document.getElementById('mobile-menu-close');
+        
+        if(mobileMenuBtn) {
+            mobileMenuBtn.addEventListener('click', () => {
+                mobileMenu.classList.remove('hidden');
+                mobileMenu.classList.add('flex');
+            });
+        }
+        if(mobileMenuClose) {
+            mobileMenuClose.addEventListener('click', () => {
+                mobileMenu.classList.add('hidden');
+                mobileMenu.classList.remove('flex');
+            });
+        }
+
+        document.querySelectorAll('.mobile-link').forEach(link => {
+            link.addEventListener('click', () => {
+                mobileMenu.classList.add('hidden');
+                mobileMenu.classList.remove('flex');
+            });
+        });
+
+        // Contact Form
+        const contactForm = document.getElementById('contact-form');
+        if(contactForm) {
+            contactForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const name = document.getElementById('name').value;
+                const email = document.getElementById('email').value;
+                const type = document.getElementById('project-type').value;
+                const message = document.getElementById('message').value;
+                const whatsappMessage = `*New Inquiry from Portfolio*%0A%0A*Name:* ${name}%0A*Email:* ${email}%0A*Project Type:* ${type}%0A*Message:* ${message}`;
+                window.open(`https://wa.me/917047721792?text=${whatsappMessage}`, '_blank');
+            });
+        }
+
+        // Scroll Animation
+        const observerOptions = { threshold: 0.1, rootMargin: "0px 0px -30px 0px" };
+        const revealObserver = new IntersectionObserver((entries, observer) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('reveal-visible');
+                    entry.target.classList.remove('reveal-hidden');
+                    if(entry.target.classList.contains('skill-bar-container')) {
+                        const level = entry.target.getAttribute('data-level');
+                        const fill = entry.target.querySelector('.skill-bar-fill');
+                        if(fill) setTimeout(() => { fill.style.width = level + '%'; }, 200);
+                    }
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, observerOptions);
+
+        document.querySelectorAll('.reveal-on-scroll').forEach(el => {
+            el.classList.add('reveal-hidden');
+            revealObserver.observe(el);
+        });
+    </script>
+</body>
+</html>
