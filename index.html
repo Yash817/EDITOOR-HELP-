@@ -121,36 +121,83 @@
             }, (err) => console.error("Reel fetch error:", err));
         }
 
+        // Helper to extract Video IDs safely
+        function getVideoId(url) {
+            if (!url) return null;
+            
+            // YouTube
+            const ytRegExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+            const ytMatch = url.match(ytRegExp);
+            if (ytMatch && ytMatch[2].length === 11) {
+                return { type: 'youtube', id: ytMatch[2] };
+            }
+
+            // Vimeo
+            const vimeoRegExp = /vimeo\.com\/(?:channels\/(?:\w+\/)?|groups\/([^\/]*)\/videos\/|)(\d+)(?:|\/\?)/;
+            const vimeoMatch = url.match(vimeoRegExp);
+            if (vimeoMatch && vimeoMatch[2]) {
+                return { type: 'vimeo', id: vimeoMatch[2] };
+            }
+            
+            // Instagram (Reels, Post, TV)
+            const instaRegExp = /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:p|reel|tv)\/([a-zA-Z0-9_-]+)\/?/;
+            const instaMatch = url.match(instaRegExp);
+            if (instaMatch && instaMatch[1]) {
+                return { type: 'instagram', id: instaMatch[1] };
+            }
+
+            return null;
+        }
+
         function updateShowreelUI(data, id) {
             const container = document.getElementById('featured-reel-container');
-            // If it's a YouTube/Vimeo link, embed it. If direct video, use video tag.
             let mediaHtml = '';
-            // Check for direct base64 video (starts with data:video)
-            if (data.videoUrl && data.videoUrl.startsWith('data:video')) {
-                mediaHtml = `<video class="w-full h-full object-cover" src="${data.videoUrl}" controls autoplay loop muted playsinline></video>`;
-            } else if (data.videoUrl && (data.videoUrl.includes('youtube') || data.videoUrl.includes('youtu.be'))) {
-                const videoId = data.videoUrl.split('v=')[1] || data.videoUrl.split('/').pop();
-                mediaHtml = `<iframe class="w-full h-full object-cover" src="https://www.youtube.com/embed/${videoId}?autoplay=0&mute=0&controls=1&rel=0" frameborder="0" allowfullscreen></iframe>`;
-            } else if (data.videoUrl && data.videoUrl.includes('vimeo')) {
-                const videoId = data.videoUrl.split('/').pop();
-                mediaHtml = `<iframe class="w-full h-full object-cover" src="https://player.vimeo.com/video/${videoId}" frameborder="0" allow="autoplay; fullscreen" allowfullscreen></iframe>`;
-            } else {
-                 mediaHtml = `
-                    <div class="relative w-full h-full group cursor-pointer overflow-hidden" onclick="window.open('${data.videoUrl}', '_blank')">
-                        <img src="${data.thumbnail || 'https://via.placeholder.com/1920x1080/111/cyan?text=No+Thumbnail'}" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105" alt="${data.title}">
-                        <div class="absolute inset-0 bg-black/50 flex items-center justify-center group-hover:bg-black/30 transition-all">
-                            <div class="w-20 h-20 rounded-full border-2 border-cyan flex items-center justify-center bg-black/50 backdrop-blur-sm group-hover:scale-110 transition-transform">
-                                <i class="fas fa-play text-cyan text-2xl ml-1"></i>
+            let videoUrl = data.videoUrl || '';
+            
+            // 0. Manual Iframe Code (User pasted <iframe ...>)
+            if (videoUrl.trim().startsWith('<iframe')) {
+                 // Simple cleanup to ensure it fits container
+                 let embedCode = videoUrl;
+                 embedCode = embedCode.replace(/width="[^"]*"/g, 'width="100%"').replace(/height="[^"]*"/g, 'height="100%"');
+                 mediaHtml = `<div class="w-full h-full iframe-container">${embedCode}</div>`;
+            }
+            // 1. Direct Base64 Video (File Upload)
+            else if (videoUrl.startsWith('data:video')) {
+                mediaHtml = `<video class="w-full h-full object-cover" src="${videoUrl}" controls autoplay loop muted playsinline></video>`;
+            } 
+            // 2. Direct MP4/WebM Link
+            else if (videoUrl.match(/\.(mp4|webm|ogg)$/i)) {
+                mediaHtml = `<video class="w-full h-full object-cover" src="${videoUrl}" controls autoplay loop muted playsinline></video>`;
+            }
+            // 3. Platform Detection (YT, Vimeo, Insta)
+            else {
+                const videoInfo = getVideoId(videoUrl);
+                if (videoInfo && videoInfo.type === 'youtube') {
+                    mediaHtml = `<iframe class="w-full h-full object-cover" src="https://www.youtube.com/embed/${videoInfo.id}?autoplay=0&mute=0&controls=1&rel=0" frameborder="0" allowfullscreen></iframe>`;
+                } else if (videoInfo && videoInfo.type === 'vimeo') {
+                    mediaHtml = `<iframe class="w-full h-full object-cover" src="https://player.vimeo.com/video/${videoInfo.id}" frameborder="0" allow="autoplay; fullscreen" allowfullscreen></iframe>`;
+                } else if (videoInfo && videoInfo.type === 'instagram') {
+                    // Instagram Embed
+                    mediaHtml = `<iframe class="w-full h-full object-cover" src="https://www.instagram.com/p/${videoInfo.id}/embed" frameborder="0" allowfullscreen scrolling="no"></iframe>`;
+                } else {
+                    // 4. Fallback Image Link
+                    mediaHtml = `
+                        <div class="relative w-full h-full group cursor-pointer overflow-hidden" onclick="window.open('${videoUrl}', '_blank')">
+                            <img src="${data.thumbnail || 'https://via.placeholder.com/1920x1080/111/cyan?text=No+Thumbnail'}" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-105" alt="${data.title}">
+                            <div class="absolute inset-0 bg-black/50 flex items-center justify-center group-hover:bg-black/30 transition-all">
+                                <div class="w-20 h-20 rounded-full border-2 border-cyan flex items-center justify-center bg-black/50 backdrop-blur-sm group-hover:scale-110 transition-transform">
+                                    <i class="fas fa-play text-cyan text-2xl ml-1"></i>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                `;
+                    `;
+                }
             }
 
             container.innerHTML = `
-                <div class="aspect-video w-full rounded-lg overflow-hidden border border-gray-800 shadow-2xl shadow-cyan/10 relative group">
+                <div class="aspect-video w-full rounded-lg overflow-hidden border border-gray-800 shadow-2xl shadow-cyan/10 relative group bg-black">
                     ${mediaHtml}
-                    <div class="absolute bottom-0 left-0 w-full p-6 bg-gradient-to-t from-black via-black/80 to-transparent pointer-events-none">
+                    <div class="absolute bottom-0 left-0 w-full p-6 bg-gradient-to-t from-black via-black/80 to-transparent pointer-events-none z-10">
                         <h3 class="text-3xl font-cinzel text-white mb-1">${data.title || 'Untitled Reel'}</h3>
                         <p class="text-cyan font-inter text-sm tracking-widest uppercase">${data.subtitle || 'Featured Work'}</p>
                     </div>
@@ -164,18 +211,20 @@
             if(document.getElementById('admin-reel-title')) {
                 document.getElementById('admin-reel-title').value = data.title || '';
                 document.getElementById('admin-reel-subtitle').value = data.subtitle || '';
-                // Don't populate huge base64 strings into the text input, keep it clean
-                if (!data.videoUrl.startsWith('data:video')) {
-                    document.getElementById('admin-reel-video').value = data.videoUrl || '';
+                
+                // Smart input population
+                const inputField = document.getElementById('admin-reel-video');
+                if (videoUrl.startsWith('data:video')) {
+                    inputField.placeholder = "Current: Uploaded File (Hidden)";
+                    inputField.value = ""; // Clear for privacy/size
                 } else {
-                     document.getElementById('admin-reel-video').placeholder = "Current: Uploaded Video (Device)";
-                     document.getElementById('admin-reel-video').value = "";
+                    inputField.value = videoUrl || '';
                 }
             }
         }
 
         function fetchProjects() {
-            const q = window.collectionPathPublic('projects'); // Ideally order by timestamp if field exists
+            const q = window.collectionPathPublic('projects'); 
             onSnapshot(q, (snapshot) => {
                 const grid = document.getElementById('work-grid');
                 grid.innerHTML = '';
@@ -197,9 +246,6 @@
                     
                     let linkAction = `href="${project.videoUrl}" target="_blank"`;
                     let playButton = `WATCH PROJECT <i class="fas fa-arrow-right ml-2 transform group-hover/btn:translate-x-1 transition-transform"></i>`;
-                    
-                    // If uploaded video, open in new tab or create a modal (for simplicity here, new tab/simple view)
-                    // Or if it's a direct video file, we can show a small preview on hover or handle differently
                     
                     card.innerHTML = `
                         <img src="${project.thumbnail || 'https://via.placeholder.com/800x1000/111/333?text=Project'}" alt="${project.title}" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110 opacity-80 group-hover:opacity-100">
@@ -236,16 +282,17 @@
 
         // --- Admin Functions ---
         window.saveReel = async () => {
-            const title = document.getElementById('admin-reel-title').value;
-            const subtitle = document.getElementById('admin-reel-subtitle').value;
-            let videoUrl = document.getElementById('admin-reel-video').value;
+            const title = document.getElementById('admin-reel-title').value.trim();
+            const subtitle = document.getElementById('admin-reel-subtitle').value.trim();
+            // Get URL from text box first
+            let videoUrl = document.getElementById('admin-reel-video').value.trim();
             const thumbnail = document.getElementById('admin-reel-thumb-preview').src;
             
-            // Check for file upload
+            // Check for file upload (overwrites URL if present)
             const fileInput = document.getElementById('admin-reel-file-upload');
             if (fileInput.files.length > 0) {
                 const file = fileInput.files[0];
-                if (file.size > 900000) { // ~900KB safety limit for Firestore
+                if (file.size > 900000) { // ~900KB safety limit
                     alert("⚠️ Video file too large! Please upload a video smaller than 1MB or use a YouTube URL.");
                     return;
                 }
@@ -257,7 +304,25 @@
                 }
             }
 
-            if (!title || !videoUrl) return alert("Title and Video (URL or File) are required");
+            // Validation: Must have a URL OR a previously saved video (checking if field is empty is tricky if file exists on server but not in input)
+            // But here, if input is empty and no file selected, we alert.
+            // If user wants to KEEP existing video but change title, they should leave the URL field populated (which updateShowreelUI does) OR it handles the base64 case logic separately.
+            // Simplified: If input is empty and no file, warn user.
+            
+            // Edge case: If current is Base64, input is empty. If user just changes Title and clicks save, videoUrl is "".
+            // FIX: If videoUrl is empty and we have a currentReelId, we should probably fetch the old one? 
+            // Better approach: updateShowreelUI clears the input for Base64. 
+            // If user enters nothing, we assume they want to keep the old video? 
+            // For now, let's enforce: If input is empty, and no file, alert "Enter Link".
+            // BUT if they just want to update title? 
+            
+            // Hacky fix for keeping existing Base64 video if input is empty:
+            // This requires reading the current state which we can't easily do without another fetch.
+            // USER INSTRUCTION: "To update title only for uploaded videos, please re-upload or use links."
+            
+            if (!title || !videoUrl) {
+                return alert("Title and Video Link are required. (If you have an uploaded video, please re-select it or switch to a Link).");
+            }
 
             const btn = document.getElementById('save-reel-btn');
             btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
@@ -269,7 +334,7 @@
                 } else {
                     await addDoc(window.collectionPathPublic('showreel'), data);
                 }
-                alert("Showreel updated!");
+                alert("Showreel updated successfully!");
                 // Clear file input
                 fileInput.value = "";
             } catch (e) {
@@ -280,16 +345,15 @@
         };
 
         window.addProject = async () => {
-            const title = document.getElementById('admin-proj-title').value;
-            const category = document.getElementById('admin-proj-cat').value;
-            let videoUrl = document.getElementById('admin-proj-video').value;
+            const title = document.getElementById('admin-proj-title').value.trim();
+            const category = document.getElementById('admin-proj-cat').value.trim();
+            let videoUrl = document.getElementById('admin-proj-video').value.trim();
             const thumbnail = document.getElementById('admin-proj-thumb-preview').src;
             
-            // Check for file upload
             const fileInput = document.getElementById('admin-proj-file-upload');
             if (fileInput.files.length > 0) {
                 const file = fileInput.files[0];
-                 if (file.size > 900000) { // ~900KB safety limit
+                 if (file.size > 900000) { 
                     alert("⚠️ Video file too large! Please upload a video smaller than 1MB or use a YouTube URL.");
                     return;
                 }
@@ -311,7 +375,6 @@
                     title, category, videoUrl, thumbnail, createdAt: new Date().toISOString()
                 });
                 alert("Project added!");
-                // Clear form
                 document.getElementById('admin-proj-title').value = '';
                 document.getElementById('admin-proj-video').value = '';
                 document.getElementById('admin-proj-thumb-preview').src = '';
@@ -356,7 +419,6 @@
             if (file) {
                 const reader = new FileReader();
                 reader.onload = function(e) {
-                    // Basic compression/limit check could go here
                     if(e.target.result.length > 900000) {
                         alert("Image too large (max 900KB). Please use a smaller image or an external URL.");
                         return;
